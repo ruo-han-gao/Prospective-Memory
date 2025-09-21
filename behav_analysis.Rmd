@@ -1,0 +1,319 @@
+---
+title: "Neuroscience LabRot Data Analysis"
+author: "Ruohan Gao"
+date: "2025-05-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, warning = TRUE, 
+                      message = FALSE, cache = TRUE, progress = FALSE)
+```
+
+
+```{r setup wd, include=FALSE} 
+setwd("~/Documents/RPTU/WS_24_25/LB_Nneuroscience/data")
+```
+
+```{r load packages}
+library(dplyr)
+library(performance)
+library(ggplot2)
+library(tidyr)
+library(car)
+library(brms)
+library(loo)
+library(gridExtra)
+library(lme4)
+library(lmerTest)
+library(gridExtra)
+```
+
+
+# Prepare Main dataframe
+```{r read in main data}
+mainfiles <- list.files(path = "behavioral_data", pattern = "^MainExperiment_[0-9]+\\.txt$", full.names = TRUE)
+
+maindata <- do.call(rbind, lapply(mainfiles, function(file) {
+  participant_num <- sub(".*MainExperiment_([0-9]+)\\.txt$", "\\1", file)
+  
+  df <- read.table(file, header = TRUE, sep = "\t")
+  
+  #add participant number for potentially random effect analysis
+  df$participant <- as.integer(participant_num)
+  return(df)
+}))
+
+```
+
+# Accuracy
+Hypothesis:
+The accuracy is expected to be similar across different valence conditions.
+
+```{r trigger and accuracy}
+get_trigger = function(df){
+  df %>%
+  mutate(trigger = ifelse(Valence == "Neutral" & Arousal == "Neutral", Stimulus + 20,
+                   ifelse(Valence == "Positive" & Arousal == "High", Stimulus + 40,
+                   ifelse(Valence == "Positive" & Arousal == "Low", Stimulus + 60,
+                   ifelse(Valence == "Negative" & Arousal == "High", Stimulus + 80,
+                   ifelse(Valence == "Negative" & Arousal == "Low", Stimulus + 100, NA))))))
+}
+
+get_accuracy <- function(df) {
+  df %>%
+    mutate(
+      correct_response = case_when(
+        Trial %in% c(1, 2) ~ NA_real_,
+        trigger %in% c(33, 34, 53, 54, 73, 74, 93, 94, 113, 114) ~ 2,
+        participant %% 2 == 1 & Stimulus == LastStimuli ~ 1,
+        participant %% 2 == 1 & Stimulus != LastStimuli ~ 3,
+        participant %% 2 == 0 & Stimulus == LastStimuli ~ 3,
+        participant %% 2 == 0 & Stimulus != LastStimuli ~ 1,
+        TRUE ~ NA_real_
+      ),
+      
+      accuracy = case_when(
+        !(Trial %in% c(1, 2)) & RT == 0 ~ 0,
+        Response == correct_response ~ 1,
+        Response != correct_response ~ 0,
+        TRUE ~ NA_real_
+      )
+    )
+}
+
+```
+
+
+## General accuracy
+
+```{r general accuracy }
+
+maindata = get_trigger(maindata)
+maindata = get_accuracy(maindata)
+mean(maindata$accuracy, na.rm = TRUE)
+
+```
+
+## Accuracy per person
+
+```{r accuracy per person}
+main_accuracy = maindata %>%
+  group_by(participant) %>%
+  summarise(
+    accuracy_percent = round(mean(accuracy, na.rm = TRUE) * 100, 2)
+  )
+main_accuracy
+```
+
+### Note
+Unusual accuracy from participant 40, 41, and 46. 
+
+## df with only accuracy > 70%
+
+```{r}
+participants_above_70 <- main_accuracy %>%
+  filter(accuracy_percent >= 70) %>%
+  pull(participant)
+
+maindf <- maindata %>%
+  filter(participant %in% participants_above_70)
+unique(maindf$participant)
+length(unique(maindf$participant))
+```
+
+```{r}
+accuracy_summary <- maindf %>%
+  group_by(Valence, Arousal) %>%
+  summarise(
+    accuracy_percent = round(mean(accuracy, na.rm = TRUE) * 100, 2),
+    n = n(),
+    .groups = "drop"
+  )
+accuracy_summary
+```
+
+## Compare accuracy
+
+```{r glm, eval=FALSE, include=FALSE}
+
+glmer_acc1 <- glmer(accuracy ~ Valence + Arousal + (1|participant), data = maindf, family = binomial())
+
+glmer_acc2 <- glmer(accuracy ~ Valence + (1|participant), data = maindf, family = binomial())
+
+glmer_acc3 <- glmer(accuracy ~ Valence + (Valence|participant), data = maindf, family = binomial())
+
+glm_acc4 <- glm(accuracy ~ Valence, data = maindf, family = binomial())
+
+glmer_acc6 <- glmer(accuracy ~ Valence * Arousal + (1|participant), data = maindf, family = binomial())
+
+AIC(glmer_acc1, glmer_acc2, glmer_acc3,glm_acc4, glmer_acc6)
+BIC(glmer_acc1, glmer_acc2, glmer_acc3,glm_acc4, glmer_acc6)
+
+
+summary(glmer_acc2)
+```
+
+
+### Set contrasts
+
+#### Treatment contrast, Neutral as reference
+```{r}
+# dummy coding use "Neutral" as reference
+maindf$Valence = as.factor(maindf$Valence) # "Negative", "Neutral", "Positive"
+contrasts(maindf$Valence) = contr.treatment(3, base = 2)
+colnames(contrasts(maindf$Valence)) = c("+Neg vs. N", "+Pos vs. N")
+contrasts(maindf$Valence)
+
+glmer_acc_c_treat <- glmer(accuracy ~ Valence + (1|participant), data = maindf, family = binomial())
+summary(glmer_acc_c_treat)
+```
+
+```{r anova}
+anova(glmer_acc_c_treat)
+```
+
+```{r r2}
+r2(glmer_acc_c_treat)
+```
+
+```{r effect size}
+glmer_acc_c_treat_effect_size = exp(fixef(glmer_acc_c_treat))
+glmer_acc_c_treat_effect_size
+```
+
+
+```{r 95 CI}
+glmer_acc_c_treat_CI = exp(confint(glmer_acc_c_treat, method = "profile"))
+glmer_acc_c_treat_CI
+
+```
+
+##### Interpretation
+The accuracy was significantly higher in the Negative and Positive conditions compared to Neutral valence.
+
+
+# RT
+Hypothesis:
+Reaction time (RT): We expect to find a main effect of valence on the RTs with slower RTs for neutral condition.
+
+## RT distribution
+```{r}
+range(maindf$RT)
+range(maindf$RT[maindf$RT != 0])
+```
+
+```{r}
+hist(maindf$RT[maindf$RT != 0])
+
+```
+
+
+## Trim data
+To filter out the inaccurate ones and the ones with RT 2.5 sd away from each person's mean RT.
+
+```{r}
+maindata_trim <- maindf %>%
+  filter(accuracy == 1 & RT != 0) %>%
+  group_by(participant) %>%
+  filter(between(RT,
+                 mean(RT, na.rm = TRUE) - 2.5 * sd(RT),
+                 mean(RT, na.rm = TRUE) + 2.5 * sd(RT))) %>%
+  ungroup()
+
+
+hist(maindata_trim$RT)
+```
+
+```{r}
+ggplot(maindata_trim, aes(x=RT)) +
+  geom_density(aes(y=after_stat(density)), colour = "black", fill = "white") +
+  geom_vline(aes(xintercept = mean(RT, na.rm = T)), color = "red", linetype = "dashed", linewidth = 1)
+```
+
+```{r}
+range(maindata_trim$RT)
+round((1-length(maindata_trim$RT)/length(maindf$RT))*100,2)
+```
+--> 14.84% of data are trimmed out.
+
+```{r}
+ggplot(maindata_trim, aes(x = Valence, y = RT)) +
+  geom_boxplot(fill = "skyblue", alpha = 0.7) +
+  labs(
+    title = "Reaction Time by Valence",
+    x = "Valence",
+    y = "Reaction Time (ms)"
+  ) +
+  theme_minimal()
+
+
+ggplot(maindata_trim, aes(x = Valence, y = RT)) +
+  stat_summary(fun = mean, geom = "point", size = 3, color = "darkblue") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  labs(title = "Mean Reaction Time by Valence", y = "RT (ms)") +
+  theme_classic()
+
+```
+
+
+## RT analysis
+
+### Set contrasts
+```{r}
+# dummy coding use "Neutral" as reference
+maindata_trim$Valence = as.factor(maindata_trim$Valence) # "Negative", "Neutral", "Positive"
+contrasts(maindata_trim$Valence) = contr.treatment(3, base = 2)
+colnames(contrasts(maindata_trim$Valence)) = c("+Neg vs. N", "+Pos vs. N")
+contrasts(maindata_trim$Valence)
+
+```
+
+### lm on RT
+```{r}
+
+lm_rt = lm(RT ~ Valence * Arousal, data = maindata_trim)
+lm_rt2 = lm(RT ~ Valence + Arousal, data = maindata_trim)
+lm_rt3 = lm(RT ~ Valence, data = maindata_trim)
+AIC(lm_rt, lm_rt2, lm_rt3)
+BIC(lm_rt, lm_rt2, lm_rt3)
+
+```
+
+```{r}
+qqnorm(resid(lm_rt3))
+qqline(resid(lm_rt3))
+```
+
+The residuals aren't perfect but still acceptable.
+
+### lmer on RT
+
+```{r}
+lmer_rt = lmer(RT ~ Valence + (Valence| participant), data = maindata_trim)
+lmer_rt2 = lmer(RT ~ Valence + (1 | participant), data = maindata_trim)
+AIC(lm_rt3, lmer_rt, lmer_rt2)
+BIC(lm_rt3, lmer_rt, lmer_rt2)
+```
+
+```{r}
+qqnorm(resid(lmer_rt))
+qqline(resid(lmer_rt))
+```
+
+```{r}
+anova(lmer_rt)
+summary(lmer_rt)
+```
+
+```{r}
+r2(lmer_rt)
+```
+
+```{r}
+lmer_rt_CI = confint(lmer_rt, method = "boot", nsim = 1000)
+lmer_rt_CI
+```
+
+
+
